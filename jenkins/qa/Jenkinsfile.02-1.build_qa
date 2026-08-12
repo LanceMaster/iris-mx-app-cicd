@@ -1,0 +1,341 @@
+// =====================================================================
+// Jenkinsfile.build.qa — Mendix 앱 빌드 파이프라인 (QA 전용, git tag 기반 버전 자동화)
+// 대상: Build 서버 (Jenkins Agent: build-node)
+// 브랜치: qa/release 고정
+//
+// 버전 관리 방식 — git tag로만 관리 (VERSION 파일 없음):
+//   - 직전 정식(prod) 태그를 조회하고, 빌드 파라미터 VERSION_BUMP(patch/minor/major)로 자리 증가
+//   - 같은 기능을 여러 번 다시 빌드해도(rc.2, rc.3 ...) 직전 prod 태그는 안 바뀌므로
+//     동일한 VERSION_BUMP 선택을 유지하는 한 베이스 버전이 일관되게 계산됨
+//   - rc 번호는 "이번 베이스 버전"에 한정해서 태그를 조회
+//
+// 흐름: GitHub Pull(qa/release) → git tag로 버전 계산(rc) → Mendix Buildpack 빌드
+//       → Docker 이미지 생성 → Registry Push → Git 태그(rc) → QA 배포 트리거
+// =====================================================================
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 30, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(name: 'BRANCH', defaultValue: 'release', description: '검증 브랜치 입력(기본값 :  release) ') 
+        choice(name: 'VERSION_BUMP', choices: ['patch', 'minor', 'major'],
+               description: '버전 증가 단위 선택 (기본: patch). 같은 기능을 재빌드할 땐 동일 값을 유지하세요.')
+        booleanParam(name: 'ROLLBACK_ON_FAIL', defaultValue: false, description: '배포 실패 시 자동 롤백')
+    }
+
+    environment {
+        //태그 제한 갯수
+        TAG_CNT_LIMIT = 10 
+        DEPLOY_ENV = "qa"
+
+        WRK_DTTM = new Date().format('yyyyMMddHHmmss').toString()
+        APP_NAME = "mendix-iris-${env.DEPLOY_ENV}"
+
+        OS_USER = 'mxadmin'
+        OS_OWNER = 'mendix'
+                 
+        //github,gitlab 환경변수 설정 
+        GITHUB_URL = "https://github.samsungds.net/DS-N-PLM/iris-mx-app.git"
+        GIT_CREDENTIAL_ID = 'prd-mx-nplm-git' 
+        BRANCH_NAME = "${params.BRANCH}"  
+ 
+        
+        //harbor,docker repogitory 환경변수 설정 
+        DOCKER_ENDPOINT = "10.173.129.72:5001"      //deploy server 사용
+        DOCKER_HOST_ENDPOINT = "ptdeploylxw01:5001"
+        DOCKER_DIR_PREFIX = "iris/app"
+         
+        //mendix
+        BUILD_PATH = 'mendixIrisQA' 
+        BLOBSTORE = 'http://10.173.129.72:28080'    //deploy server 사용
+          
+        
+        DOCKER_BUILD_PACK_PATH = '/appdata/siemens/workspace/mx/mx_iris/docker-mendix-buildpack'
+        APP_WRK_PATH = "/appdata/siemens/workspace/mx/mx_iris/${env.DEPLOY_ENV}/mxdeploy-dir"
+        APP_DIR_PATH = "${APP_WRK_PATH}/${APP_NAME}"    
+        MX_DESTINATION = "${APP_WRK_PATH}/${BUILD_PATH}"
+
+        //etc
+        // dubious ownership 오류 방지 — 파일(.gitconfig)에 의존하지 않고
+        // 파이프라인 내 모든 git 프로세스(checkout() 포함)에 환경변수로 직접 주입
+        GIT_CONFIG_COUNT   = '1'
+        GIT_CONFIG_KEY_0   = 'safe.directory'
+        GIT_CONFIG_VALUE_0 = '*'
+       
+               
+    }
+
+    stages {
+        stage('Remote git Checkout') {
+            steps {
+                // GitLab Credential을 Jenkins 변수로 불러오기
+                withCredentials([ string(credentialsId: GIT_CREDENTIAL_ID, variable: 'GITHUB_PAT')]) {
+                    script {
+                        def GITHUB_URL_WITH_CREDENTIAL = GITHUB_URL.replace('://','://${GITHUB_PAT}@')
+                        sh """
+                           
+                            echo "--- Starting checkout process on deploy server ---" 
+
+                            # 1. 작업 디렉토리 정리
+                            echo "--- cleaning up workspace: ${env.APP_WRK_PATH} ---"
+                            sudo mkdir -p ${env.APP_WRK_PATH} 
+                            sudo chown -R ${env.OS_USER}:${env.OS_OWNER} ${env.APP_WRK_PATH}
+
+                            cd ${env.APP_WRK_PATH}
+
+                            sudo rm -rf   ${env.APP_NAME}*  
+                            sudo rm -rf   ${env.BUILD_PATH}  
+                             
+                            # 2. Git Clone 실행 (Shallow Clone)
+                            echo "--- Cloning branch '${env.BRANCH_NAME}' into '${env.APP_NAME}' directory ---"
+ 
+                            echo "Git 저장소에서 코드 체크아웃"  
+                            sudo git clone --depth 1 --branch ${env.BRANCH_NAME} $GITHUB_URL_WITH_CREDENTIAL  ${env.APP_DIR_PATH}
+    
+                            cd ${env.APP_NAME}
+    
+                            # Jenkins에서 받은 브랜치명 사용 
+                            ## 얕은 클론 방지 
+                            ## sudo git rev-parse --ls-shallow-repository > /dev/null 2>&1
+
+                            ## sudo git fetch ${GITHUB_URL_WITH_CREDENTIAL}  --unshallow || true
+
+                            ## 태그 목록이 전부 있어야 git describe 가 정확하므로 전체 fetch 보장
+                            sudo  git fetch ${GITHUB_URL_WITH_CREDENTIAL}  --tags --force
+
+                            echo "--- deploy server checkout finished successfully ---"
+                        """
+                    }
+                }
+            }
+        }
+ 
+
+       // 빌드 버전 적용
+        stage('Resolve Version') {
+            steps {
+                withCredentials([ string(credentialsId: GIT_CREDENTIAL_ID, variable: 'GITHUB_PAT')]) {            
+                    script {
+                        def GITHUB_URL_WITH_CREDENTIAL = GITHUB_URL.replace('://','://${GITHUB_PAT}@')
+                      
+                        
+                        // 1) 직전 정식(prod) 태그 조회 — rc 태그는 패턴에서 제외
+                        def lastProdTag = sh(
+                            script: "git -C '${env.APP_DIR_PATH}'  tag -l '*' | grep -vE '\\-rc\\.' | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+' | sort -V | tail -1",
+                            returnStdout: true
+                        ).trim() 
+
+                        def (curMajor, curMinor, curPatch) = ['0', '0', '0']
+                        if (lastProdTag) {
+                          
+                            def m = (lastProdTag =~ /^(\d+)\.(\d+)\.(\d+)$/)
+                            if (m.matches()) {
+                                curMajor = m.group(1)
+                                curMinor = m.group(2)
+                                curPatch = m.group(3)
+                            }
+                        }
+                        echo "▶ 직전 prod 태그: ${lastProdTag ?: '(없음, 0.0.0 기준)'}"
+
+
+                        int major = curMajor as int
+                        int minor = curMinor as int
+                        int patch = curPatch as int
+
+                     
+                        switch (params.VERSION_BUMP) {
+                            case 'major':
+                                major += 1; minor = 0; patch = 0
+                                echo "▶ VERSION_BUMP=major → Major 증가"
+                                break
+                            case 'minor':
+                                minor += 1; patch = 0
+                                echo "▶ VERSION_BUMP=minor → Minor 증가"
+                                break
+                            default:
+                                patch += 1
+                                echo "▶ VERSION_BUMP=patch (기본값) → Patch 증가"
+                                break
+                        }
+
+                        def baseVer = "${major}.${minor}.${patch}"   // 이번에 예정된 다음 버전
+                        env.BASE_VERSION = "${baseVer}"  // 해당 버전 과거 버전삭제 처리를 위한 값 
+                        
+                    
+                        // 3) 이 베이스 버전에 한정해 rc 번호 조회
+                        def lastRc = sh(
+                            script: "git -C '${env.APP_DIR_PATH}' tag -l 'v${baseVer}-rc.*' | sort -V | tail -1 | grep -oP 'rc\\.\\K[0-9]+' || echo 0",
+                            returnStdout: true
+                        ).trim()
+
+                        def nextRc = (lastRc as int) + 1
+
+                        env.APP_VERSION = "${baseVer}-rc.${nextRc}" 
+                        env.GIT_TAG     = "${baseVer}-rc.${nextRc}" 
+                     
+                        echo "▶ 빌드 버전: ${env.APP_VERSION}  / GitHub: ${env.GIT_TAG}"    
+                    }
+                }
+            }    
+        }
+ 
+        stage('Package buildpack / Image Build') {
+            steps {
+                script {
+                    sh """ 
+                        echo "--- Starting build on deploy server ---"
+
+                        # 작업 디렉토리로 이동
+                        cd "${env.APP_WRK_PATH}"
+                        sudo mkdir -p "${env.MX_DESTINATION}"
+                        sudo chown -R ${env.OS_USER}:${env.OS_OWNER} ${env.MX_DESTINATION}    
+                        # === 3. 빌드팩 다운로드 및 Mendix 빌드 실행 ===
+                        echo "--- Downloading buildpack and building MDA ---"
+ 
+                        ##docker-mendix-buildpack-5.1.0   
+                        cd ${env.DOCKER_BUILD_PACK_PATH} 
+                       
+                        # ./build.py 실행
+                        sudo ./build.py  --artifacts-repository ${env.DOCKER_ENDPOINT}/mendix-buildpack \
+                                    --source ${env.APP_DIR_PATH} \
+                                    --destination ${env.MX_DESTINATION} \
+                                    build-mda-dir
+
+                        # === 4. Docker 이미지 빌드 ===
+                        echo "--- Building Docker Image ---"
+
+                        ##docker build
+                        docker build --label project=${env.APP_NAME} \
+                                     --build-arg ROOTFS_IMAGE=mendix-rootfs:app \
+                                     --build-arg BUILDER_ROOTFS_IMAGE=mendix-rootfs:builder \
+                                     --build-arg EXCLUDE_LOGFILTER=true \
+                                     --build-arg BLOBSTORE=${env.BLOBSTORE} \
+                                     --build-arg BUILDPACK_XTRACE=true \
+                                     -t ${env.APP_NAME}:${env.APP_VERSION} \
+                                     -f ${env.MX_DESTINATION}/Dockerfile \
+                                     ${env.MX_DESTINATION}
+
+                        # === 5. Docker 이미지 푸시 및 정리 ===
+                        echo "--- Tagging, Pushing, and Cleaning up Docker Image ---"
+
+                        docker tag ${env.APP_NAME}:${env.APP_VERSION} ${env.DOCKER_HOST_ENDPOINT}/${env.DOCKER_DIR_PREFIX}/${env.APP_NAME}:${env.APP_VERSION}
+                        docker push ${env.DOCKER_HOST_ENDPOINT}/${env.DOCKER_DIR_PREFIX}/${env.APP_NAME}:${env.APP_VERSION}
+
+                        docker images --quiet --filter=dangling=true | xargs --no-run-if-empty docker rmi
+                        ## label filter -> delete
+                        docker image prune -a -f --filter 'label=project=${APP_NAME}'
+                        sudo rm -rf '${MX_DESTINATION}'
+
+                        echo "--- deploy server build finished successfully ---"
+                    """
+                }
+            }
+        }
+
+        stage('Remote Git Tag and Push') {
+            steps { 
+                withCredentials([ string(credentialsId: GIT_CREDENTIAL_ID, variable: 'GITHUB_PAT')]) {
+                    script {   
+                        def GITHUB_URL_WITH_CREDENTIAL = GITHUB_URL.replace('://','://${GITHUB_PAT}@')
+
+                        // 원격 서버에서 실행할 전체 셸 스크립트를 Groovy GString으로 생성
+                        sh """
+                       
+                            echo "--- Starting Git Tagging process on deploy server ---" 
+                
+                            # === 2. 작업 디렉토리로 이동 ===
+                           
+                            cd "${env.APP_DIR_PATH}"
+                                                        
+ 
+                            # === 3. 기존 태그 존재 시 원격 태그 삭제 ===
+                            # 로컬에 해당 태그가 있는지 확인
+                            if [ \$(git tag -l | grep "^${env.GIT_TAG}" | wc -l) -ne 0 ]; then
+                                echo "Local tag ${env.GIT_TAG} found. Deleting remote tag before pushing new one."
+                                # git push ... :<tag>는 원격 태그를 삭제하는 명령어. 오류를 무시하기 위해 || true 추가
+                                sudo git push  ${GITHUB_URL_WITH_CREDENTIAL} :${env.GIT_TAG} || true
+                                # 로컬 태그도 삭제
+                                #sudo git tag -d ${env.GIT_TAG}
+                      
+                            fi
+ 
+                            # === 4. Git 사용자 설정 및 신규 태그 생성/푸시 ===
+                            sudo git config --global user.email "pmp-jenkins@example.com"
+                            sudo git config --global user.name "pmp-jenkins"   
+   
+                                                 
+                            echo "Creating and pushing new tag: ${env.GIT_TAG}"
+                            sudo git tag -a "${env.GIT_TAG}" -m "CI build ${env.APP_VERSION} (#${BUILD_NUMBER})"
+                            sudo git push ${GITHUB_URL_WITH_CREDENTIAL}  ${env.GIT_TAG}
+                             
+                            # 원격 저장소의 최신 상태(특히 태그)를 로컬로 반영
+                            sudo git fetch   ${GITHUB_URL_WITH_CREDENTIAL} --prune --prune-tags  
+ 
+                            # === 5. 오래된 태그 삭제 로직 ===
+                            echo "Checking for old tags to prune..."
+                            # 따옴표를 사용하여 "*develop*" 패턴을 올바르게 전달
+                            TAG_COUNT=\$(git tag --list --sort=-creatordate "${BASE_VERSION}-rc.*" | wc -l)
+
+                            if [ "\${TAG_COUNT}" -gt "${env.TAG_CNT_LIMIT}" ]; then
+                                # 가장 오래된 태그를 찾아서 삭제 (정렬 순서 수정 및 명령어 오류 수정)
+                                OLDEST_TAG=\$(git tag --list --sort=creatordate "${BASE_VERSION}-rc.*" | head -n 1)
+                                echo "Tag limit exceeded. Deleting oldest tag: \${OLDEST_TAG}"
+                                sudo git push ${GITHUB_URL_WITH_CREDENTIAL} --delete "\${OLDEST_TAG}"
+
+                            else
+                                echo "Tag count (\${TAG_COUNT}) is within the limit (${env.TAG_CNT_LIMIT})."
+                            fi
+
+                            echo "--- deploy server Git Tagging process finished successfully ---"
+                        """
+                    }
+                }
+            }
+        }
+
+        // Metadata 업데이트는 Jenkins에서 직접 수행
+        stage('Update Jenkins Metadata') {
+            steps {
+                script {
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.APP_VERSION}"
+                }
+            }
+        }           
+
+        stage('Trigger CD Job') {
+            steps {
+                build job: "pm-planner-qa-app-deploy", 
+                    wait: false,
+                    parameters: [
+                        string(name: 'IMAGE_TAG', value: "${env.APP_VERSION}"), 
+                        string(name: 'GIT_TAG', value: "${env.GIT_TAG}"),
+                        booleanParam(name: 'ROLLBACK_ON_FAIL', value: params.ROLLBACK_ON_FAIL) 
+                    ]
+            }
+        }
+    }  //stages end
+
+    post {
+        success {
+            echo "[성공] CI Pipeline Succeeded "
+        }
+        failure {
+            script {
+                echo "[실패] CI Pipeline Failed."
+            }
+        }
+        always {
+            echo "CI Pipeline Finished"
+            script {
+                currentBuild.description = "CI Pipeline for version finished."
+            }
+            cleanWs()
+        }
+    }
+}

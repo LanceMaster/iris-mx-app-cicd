@@ -1,0 +1,915 @@
+// =============================================================================
+//  원격 빌드 서버 정보 (Remote Build Server Info) 
+// =============================================================================
+def PRD_SERVERS = [
+    [
+        name: 'ptmxpmpappw01',
+        host: '10.173.133.112',                       // 운영 VM1 IP/호스트명
+        user: '',                                    // 운영 VM1 접속 계정
+        identityFile: '',                  
+ //       credentialsId: 'iris-prod-vm1-ssh-credential',    // (SSH Username with private key 권장)
+        allowAnyHosts: true
+    ],
+    [
+        name: 'ptmxpmpappw02',
+        host: '10.173.133.114',                       // 운영 VM2 IP/호스트명
+        user: '',                      // 운영 VM2 접속 계정
+        identityFile: '',          
+//        credentialsId: 'iris-prod-vm2-ssh-credential',    // (SSH Username with private key 권장)
+        allowAnyHosts: true
+    ]
+]
+
+ 
+def Map<String, Object> initConfigEnv = [:]  //환경변수
+
+// =============================================================================
+//  공통함수
+// 1.단일 따옴표 안전 이스케이프 : ' -> '"'"' 
+// =============================================================================
+def toShEscape = {String v ->    
+    if (v == null) return "''"
+    def vEx =  "'" + v.replace("'", "'\"'\"'") + "'" 
+    // echo "jenkins toShEscape: ${vEx}"
+    return vEx
+}
+
+// =============================================================================
+//  공통함수
+// 2.env 맵을  export 구문(AND 체인)으로 변환
+// =============================================================================
+def toExportChain = {Map<String, Object> envMap -> 
+    envMap.collect { k,v -> "export ${k}=" +
+    toShEscape(v?.toString() ?: "")}.join(' && ')
+}
+
+// =============================================================================
+// 공통함수
+// 3.오른쪽 공백 제거
+// =============================================================================
+def rtrim = {String rt -> 
+    if (rt == null) return ''
+    //줄 끝의 공백/탭 등만 제거
+    return rt.replaceAll(/\s+$/,'')
+}
+
+// =============================================================================
+// 공통함수
+// 3.멀티라인 명령 -> 빈줄/주석 제거하고 원래 줄 구조 유지
+// =============================================================================
+def toFilteredLiner = {String cmd -> 
+    cmd.readLines()
+        .collect { line -> rtrim(line) }   //끝 공백만 제거
+        .findAll { line ->
+            def t = line.trim()
+                return t && !t.startsWith('#')     //빈줄/주석 제외
+        }
+        .join('\n')     //줄바꿈
+}
+
+
+// =============================================================================
+//  공통함수
+// 4.sshRunAlwaysHeredoc(host,user,credId,rawCmd, extraEnv = [:], sudoE = false)
+// rawCmd : 멀티라인 (자동  && 체인)
+// extraEnv : export 앞에 주입
+// sudoE : true 면 'sudo -E bash -lc' 로 실행
+// returnE : true 면 결과값을 리턴
+// =============================================================================
+def sshRunAlwaysHeredoc = {String rawCmd,Map<String,Object> extraEnv = [:], boolean sudoE = false, boolean returnE = false  ->
+    // echo "jenkins env: ${sshconfig}"
+    //기본 env + 추가 envi
+    // 공통 환경변수 선언 
+    //APP_PATH : env.APP_PATH,
+    //TAG : env.TAG
+    Map<String,Object> mergedEnv = [
+        OS_USER : "${env.OS_USER}",        
+        OS_OWNER : "${env.OS_OWNER}",     
+        BUILD_APP_TAG : "${env.BUILD_APP_TAG}" 
+        ] + extraEnv
+
+    String exportChain = toExportChain(mergedEnv)
+    String bashPrefix = sudoE ? 'sudo -E bash -lc' : 'bash -lc'
+    def filterRawCmd = toFilteredLiner(rawCmd)
+    String scriptBody
+ 
+   if  (returnE) { 
+    // 제어문 : heredoc으로 안전하게 전달 (원격에서 변수 확장)
+    scriptBody = """
+        ${bashPrefix} ${toShEscape("""\
+        set -eo pipefail 
+        TMPDIR=\$(mktemp -d /tmp/jenkins_cmd_XXXXXXXXXXXX)
+        trap 'rc=\$?; rm -rf "\$TMPDIR"; exit \$rc' EXIT INT TERM
+cat <<'EOS' > "\$TMPDIR/tmprun.sh"
+#!/bin/bash
+set -eo pipefail
+${exportChain}
+\n
+${filterRawCmd}
+exit 0
+EOS
+        chmod 777 "\$TMPDIR"
+        chmod +x "\$TMPDIR/tmprun.sh"
+        ##"\$TMPDIR/tmprun.sh"
+        ## 스크립트 실행(stderr는 콘솔 stdoutd은 변수로) 
+        OUT=\$(echo '$PRD_MX_ADM_PW' | su - $OS_USER -c "bash \$TMPDIR/tmprun.sh" 2> >(cat 1>&2) || true)
+        ## __RESULT__: 로 시작하는 마지막 줄만 추출
+        LINE=\$(printf "%s" "\$OUT" | awk '/^__RESULT__:/ {keep=\$0} END{if(keep) print keep}')
+        ##접두사 제거 및 트리밍
+        LAST_LINE=\$(printf "%s" "\$LINE" | sed -E 's/^__RESULT__:\\s*//; s/^\\s+//; s/\\s+\$//')
+        printf "%s\\n" "\$LAST_LINE" 
+        """.stripIndent())}
+    """.trim()
+
+    } else {
+
+     // 제어문 : heredoc으로 안전하게 전달 (원격에서 변수 확장)
+    scriptBody = """
+        ${bashPrefix} ${toShEscape("""\
+        set -eo pipefail 
+        TMPDIR=\$(mktemp -d /tmp/jenkins_cmd_XXXXXXXXXXXX)
+        trap 'rc=\$?; rm -rf "\$TMPDIR"; exit \$rc' EXIT INT TERM
+cat <<'EOS' > "\$TMPDIR/tmprun.sh"
+#!/bin/bash
+set -eo pipefail
+${exportChain}
+\n
+${filterRawCmd}
+exit 0
+EOS
+        chmod 777 "\$TMPDIR"
+        chmod +x "\$TMPDIR/tmprun.sh"
+        echo '$PRD_MX_ADM_PW' | su - $OS_USER -c "bash \$TMPDIR/tmprun.sh"
+    
+        """.stripIndent())}
+    """.trim()   
+}
+    return scriptBody
+}
+ 
+
+// =============================================================================
+//  원격 실행 함수 (Remote Execution Function)
+// =============================================================================
+/**
+ * 원격 서버에서 셸 커맨드를 실행.
+ * @param config Map: 실행 설정값
+ * - remote: sshCommand에 전달할 원격 서버 정보 (name, host, user, credentialsId 등)
+ * - command: 원격 서버에서 실행할 셸 스크립트 문자열
+ */
+def remoteExecute(Map config) {
+    // sshCommand 스텝을 사용하여 원격지에서 스크립트 실행 
+    sshCommand remote: config.remote, command: config.command
+}
+
+// =============================================================================
+//  원격 실행 함수 (Remote Execution Function)
+// =============================================================================
+/**
+ * 원격 서버에서 셸 커맨드를 실행하고 그 결과를 반환합니다.
+ * 사용자스크립트에 아래 추가 
+ *  리턴 값을 사용하는 경우 아래와 같이 __RESULT__ 에 값을 대입하여 보냄
+ *  printf "__RESULT__:%s\\n" "\$LATEST_TAG" 
+ * @param config Map: 실행 설정값
+ * - remote: sshCommand에 전달할 원격 서버 정보 (name, host, user, credentialsId 등)
+ * - command: 원격 서버에서 실행할 셸 스크립트 문자열 * 
+ * @return String: 원격 명령어의 표준 출력(stdout) 결과
+ */
+def remoteExecuteAndGetOutput(Map config) {
+ 
+    def raw = sshCommand (remote: config.remote, command: config.command) 
+    def resultOut = raw?.trim()
+    //실행 결과를 반환받음
+    return resultOut?.length() ? resultOut : null
+}
+
+// =============================================================================
+//  메인 파이프라인 (Main Pipeline)
+// =============================================================================
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'DEPLOY_BRANCH', defaultValue: 'iris-mx-cicd', description: 'deploy-branch') 
+        string(name: 'IMAGE_TAG', defaultValue: '' , description: '배포할 애플리케이션 버전')  
+        string(name: 'GIT_TAG', defaultValue: '' , description: '빌드 소스 github TAG (실패 시 태그삭제-빈값인 경우 삭제안함)')  
+        booleanParam(name: 'ROLLBACK_ON_FAIL', defaultValue: false, description: '배포 실패 시 자동 롤백')
+    }
+
+    environment { 
+        //태그 제한 갯수
+        TAG_CNT_LIMIT = 10
+        BUILD_MODE = "PDDC-"
+        DEPLOY_ENV = "prd"
+
+        WRK_DTTM = new Date().format('yyyyMMddHHmmss').toString()  
+        APP_NAME = "mendix-iris"
+
+        OS_USER = 'mxadmin'
+        OS_OWNER = 'mxadmin' 
+
+  
+        //==================================================================================
+ 
+        APP_DATABASE_SID = 'MX_PMP_PRD'
+        APP_DATABASE_JDBC_URL = 'jdbc:oracle:thin:@10.155.13.162:1621/MX_PMP_PRD' 
+        APP_DATABASE_TYPE = 'Oracle'
+       
+        ES_HOST = 'http://10.173.161.78:9200'
+
+        NPLM_NPLM_URL='http://'  
+        
+        NPLM_PLAN_URL='https://'
+        NPLM_JDBC_URL='jdbc:oracle:thin:@//0:1633/DHUB'
+       //==================================================================================
+                
+
+        APP_DOMAIN_NAME = 'pmsim-plm.samsungds.net'
+        APP_PORT = '8080'
+        RUNTIME_PORT = '8080'
+        M2EE_ADMIN_PORT = '8081'
+        SSH_CREDENTIAL_ID = "prd-new-mx-plm-app-node-pk"
+
+        APP_WRK_PATH = "/appdata/siemens/workspace/mx/mx_iris/${env.DEPLOY_ENV}/mxdeploy-dir"   
+        APP_DIR_PATH = "${APP_WRK_PATH}/${APP_NAME}"
+        APP_BRANCH_PATH = "${APP_WRK_PATH}/${params.DEPLOY_BRANCH}"
+        APP_COMPOSE_PATH = "${APP_WRK_PATH}/${params.DEPLOY_BRANCH}/docker/${DEPLOY_ENV}"
+
+        //github,gitlab 환경변수 설정 
+        GITHUB_URL = "https://github.samsungds.net/DS-N-PLM/iris-mx-app.git"
+        GIT_CREDENTIAL_ID = 'prd-mx-nplm-git' 
+        BRANCH_NAME = "${params.DEPLOY_BRANCH}" 
+        BUILD_APP_TAG = "${params.GIT_TAG}"
+ 
+        //harbor,docker repogitory 환경변수 설정         
+        DOCKER_ENDPOINT = "10.173.129.72:5001"     //deploy server 변경
+        DOCKER_HOST_ENDPOINT = "ptdeploylxw01:5001" 
+        DOCKER_DIR_PREFIX = "iris/app"
+        
+        //mendix   
+        BLOBSTORE = 'http://10.173.129.72:28080'    //deploy server 사용
+  
+        //etc          
+        APP_METRIC_PORT = '8082'
+        MXRUNTIME_APPLICATION_ROOT_URL = "http://${APP_NODE_IP}:${RUNTIME_PORT}/"
+        
+    }
+
+    stages { 
+        stage('Parameter Validation & Initialize') {
+            steps {
+                script {
+                    if (params.IMAGE_TAG.trim().isEmpty()) {
+                        error "배포할 버전(version) 파라미터는 필수입니다."
+                    }
+                    env.APP_VERSION = params.IMAGE_TAG
+                    echo "Deploying version: ${env.APP_VERSION}"
+ 
+                }
+            }
+        }
+ 
+
+        stage('Remote git CI/CD branch Checkout PRD Server 1') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(credentialsId: SSH_CREDENTIAL_ID, keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER'),
+                    string(credentialsId: GIT_CREDENTIAL_ID, variable: 'GITHUB_PAT'),
+                    string(credentialsId: 'prd-mx-iris-node-pw', variable: 'PRD_MX_ADM_PW')
+                    
+                   
+                ]) {
+                    script {
+                    
+                        def remoteCheckoutScript = ""
+                        
+                        def PRDServer = PRD_SERVERS[0]
+                        //ssh mapping 
+                        PRDServer.user = "${SSH_USER}"
+                        PRDServer.identityFile = "${SSH_KEY}" 
+
+                        // try-catch 블록으로 원격 실행 실패 시 롤백 로직을 처리
+                        try {
+ 
+                            //github cicd checkout
+                            remoteCheckoutScript = checkoutCode()        
+                            // remoteExecute 함수를 호출하여 원격 서버에서 스크립트 실행                             
+                            remoteExecute(remote: PRDServer, command: sshRunAlwaysHeredoc(remoteCheckoutScript,initConfigEnv,false,false))                                                                        
+                      
+                            initConfigEnv = [:]  //환경변수  
+                           
+                        } catch (e) {
+                            // 원본 에러를 다시 발생시켜 빌드를 최종적으로 실패 처리
+                            throw e
+                        }  
+ 
+                    }
+                }
+            }
+        }
+
+          // 젠킨스 credentials 추출
+        // 한곳에서 실행 하면 됨. 배포서버(ptdeploylxw01)에서 실행.
+        stage('Create Env file credential  PRD Server 1') {
+            steps {
+                script {
+                    withCredentials([
+                        sshUserPrivateKey(credentialsId: SSH_CREDENTIAL_ID, keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER') ,
+                        usernamePassword(credentialsId: 'prd-mem-mx-iris-db-credentials',usernameVariable: 'DB_USER', passwordVariable: 'DB_PASS') ,
+                        usernamePassword(credentialsId: 'prd-mx-iris-nplm-db-credentials',usernameVariable: 'NPLM_USER', passwordVariable: 'NPLM_PW') ,                        
+                        string(credentialsId: 'prd-mem-mx-iris-mendix-lic-credentials', variable: 'LIC_KEY') ,
+                        string(credentialsId: 'prd-mx-iris-adm-app', variable: 'ADMIN_PASS'),
+                        string(credentialsId: 'prd-mx-iris-iam-api-user-pw', variable: 'IAMAPIUSER_PW'),    
+                        string(credentialsId: 'prd-mx-iris-saml20-keystore-pw', variable: 'SAML20_KEYSTORE_PASSWORD'),        
+                        string(credentialsId: 'prd-mx-iris-nplm-consumer-api-key', variable: 'NPLM_DEFAULT_CONSUMER_API_KEY'), 
+                        string(credentialsId: 'prd-mx-iris-nplm-consumer-pw', variable: 'NPLM_DEFAULT_CONSUMER_PWD'),                        
+                        string(credentialsId: 'prd-mx-iris-node-pw', variable: 'PRD_MX_ADM_PW')
+                    ]) {
+
+ 
+                        //# Jenkins 변수를 셸 변수로 설정
+                        initConfigEnv = [:]
+  
+                        echo "--- Running Deploy and Verify ---"
+
+                        def remoteEnvScript = ""
+
+                        def envContent = """
+DB_USER='${DB_USER}'
+DB_PASS='${DB_PASS}'
+NPLM_USER='${NPLM_USER}'
+NPLM_PW='${NPLM_PW}'
+LICENSE_KEY='${LIC_KEY}'
+ADMIN_PASS='${ADMIN_PASS}'
+IAMAPIUSER_PW='${IAMAPIUSER_PW}'
+SAML20_KEYSTORE_PASSWORD='${SAML20_KEYSTORE_PASSWORD}'
+NPLM_DEFAULT_CONSUMER_API_KEY='${NPLM_DEFAULT_CONSUMER_API_KEY}'
+NPLM_DEFAULT_CONSUMER_PWD='${NPLM_DEFAULT_CONSUMER_PWD}'
+                        """
+                        
+                        def PRDServer = PRD_SERVERS[0]  
+                        //ssh mapping  
+                        PRDServer.user = "${SSH_USER}"
+                        PRDServer.identityFile = "${SSH_KEY}"
+                        // try-catch 블록으로 원격 실행 실패 시 롤백 로직을 처리
+                        try {
+                       
+                            remoteEnvScript = envStrScript(envContent)        
+                            // remoteExecute 함수를 호출하여 원격 서버에서 스크립트 실행                             
+                            remoteExecute(remote: PRDServer, command: sshRunAlwaysHeredoc(remoteEnvScript,initConfigEnv,false,false))  
+                   
+                            initConfigEnv = [:]  //환경변수        
+                            
+                        } catch (e) { 
+                            // 원본 에러를 다시 발생시켜 빌드를 최종적으로 실패 처리
+                            throw e
+                        }
+
+                        
+                    }
+                }
+            }
+        }
+
+        stage('Execute Remote Deployment PRD Server 1') {
+            steps {
+                withCredentials([
+                   string(credentialsId: GIT_CREDENTIAL_ID, variable: 'GITHUB_PAT'),
+                   sshUserPrivateKey(credentialsId: SSH_CREDENTIAL_ID, keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER'),
+                   string(credentialsId: 'prd-mx-iris-node-pw', variable: 'PRD_MX_ADM_PW')
+                ]) {
+                    script {
+
+                       
+                        //# Jenkins 변수를 셸 변수로 설정
+                        initConfigEnv = [:]
+    
+                        def remoteDeployScript = "" 
+                        def PRDServer = PRD_SERVERS[0]  
+                        //ssh mapping 
+                        PRDServer.user = "${SSH_USER}"
+                        PRDServer.identityFile = "${SSH_KEY}"
+
+                        // try-catch 블록으로 원격 실행 실패 시 롤백 로직을 처리
+                        try {
+             
+                            echo "--- Starting Deployment on Remote Server [${PRDServer.host}]---" 
+
+                            remoteDeployScript = deployToServerScript(PRDServer)        
+                            // remoteExecute 함수를 호출하여 원격 서버에서 스크립트 실행                             
+                            remoteExecute(remote: PRDServer, command: sshRunAlwaysHeredoc(remoteDeployScript,initConfigEnv,false,false))           
+                            
+                            echo "--- Remote Deployment Finished Successfully ---"                        
+                           
+
+                            initConfigEnv = [:]  //환경변수      
+                  
+                        } catch (e) {
+                            if (params.ROLLBACK_ON_FAIL) {
+                                echo "Deployment failed. Attempting to rollback on remote server..."
+                                //deploy job 호출
+                                stage('Trigger CD Rollback Job') {
+                                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                        build job: "pm-planner-prd-app-rollback", parameters: [
+                                            string(name: 'rollback_tagversion', value: "")
+                                        ]
+                                    }
+
+                                    echo "Deployment failed. Attempting to github tag delete on remote server..."
+                                     def remoteDeleteTagScript = deleteTagScript()                            
+                                    remoteExecute(remote: PRDServer, command: sshRunAlwaysHeredoc(remoteDeleteTagScript,initConfigEnv,false,false))
+                                }
+                            }
+
+                            // 원본 에러를 다시 발생시켜 빌드를 최종적으로 실패 처리
+                            throw e
+                        }
+                    }
+                }
+            }
+        }
+
+ 
+        stage('Remote git CI/CD branch Checkout PRD Server 2') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(credentialsId: SSH_CREDENTIAL_ID, keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER'),
+                    string(credentialsId: GIT_CREDENTIAL_ID, variable: 'GITHUB_PAT'),
+                    string(credentialsId: 'prd-mx-iris-node-pw', variable: 'PRD_MX_ADM_PW') 
+                ]) {
+                    script {
+                    
+                        def remoteCheckoutScript = ""
+                        def PRDServer = PRD_SERVERS[1]
+                        //ssh mapping 
+                        PRDServer.user = "${SSH_USER}"
+                        PRDServer.identityFile = "${SSH_KEY}" 
+
+                        // try-catch 블록으로 원격 실행 실패 시 롤백 로직을 처리
+                        try {
+ 
+                            //github cicd checkout
+                            remoteCheckoutScript = checkoutCode()        
+                            // remoteExecute 함수를 호출하여 원격 서버에서 스크립트 실행                             
+                            remoteExecute(remote: PRDServer, command: sshRunAlwaysHeredoc(remoteCheckoutScript,initConfigEnv,false,false))                                                                        
+                     
+                            initConfigEnv = [:]  //환경변수  
+                           
+                        } catch (e) {
+                            // 원본 에러를 다시 발생시켜 빌드를 최종적으로 실패 처리
+                            throw e
+                        }  
+ 
+                    }
+                }
+            }
+        }
+
+        // 젠킨스 credentials 추출
+        // 한곳에서 실행 하면 됨. 배포서버(ptdeploylxw01)에서 실행.
+        stage('Create Env file credential  PRD Server 2') {
+            steps {
+                script {
+                    withCredentials([
+                        sshUserPrivateKey(credentialsId: SSH_CREDENTIAL_ID, keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER') ,
+                        usernamePassword(credentialsId: 'prd-mem-mx-iris-db-credentials',usernameVariable: 'DB_USER', passwordVariable: 'DB_PASS') ,
+                        usernamePassword(credentialsId: 'prd-mx-iris-nplm-db-credentials',usernameVariable: 'NPLM_USER', passwordVariable: 'NPLM_PW') ,                        
+                        string(credentialsId: 'prd-mem-mx-iris-mendix-lic-credentials', variable: 'LIC_KEY') ,
+                        string(credentialsId: 'prd-mx-iris-adm-app', variable: 'ADMIN_PASS'),
+                        string(credentialsId: 'prd-mx-iris-iam-api-user-pw', variable: 'IAMAPIUSER_PW'),    
+                        string(credentialsId: 'prd-mx-iris-saml20-keystore-pw', variable: 'SAML20_KEYSTORE_PASSWORD'), 
+                        string(credentialsId: 'prd-mx-iris-nplm-consumer-api-key', variable: 'NPLM_DEFAULT_CONSUMER_API_KEY'), 
+                        string(credentialsId: 'prd-mx-iris-nplm-consumer-pw', variable: 'NPLM_DEFAULT_CONSUMER_PWD'),                            
+                        string(credentialsId: 'prd-mx-iris-node-pw', variable: 'PRD_MX_ADM_PW')
+                    ]) {
+
+ 
+                        //# Jenkins 변수를 셸 변수로 설정
+                        initConfigEnv = [:]
+  
+                        echo "--- Running Deploy and Verify ---"
+
+                        def remoteEnvScript = ""
+
+                        def envContent = """
+DB_USER='${DB_USER}'
+DB_PASS='${DB_PASS}'
+NPLM_USER='${NPLM_USER}'
+NPLM_PW='${NPLM_PW}'
+LICENSE_KEY='${LIC_KEY}'
+ADMIN_PASS='${ADMIN_PASS}'
+IAMAPIUSER_PW='${IAMAPIUSER_PW}'
+SAML20_KEYSTORE_PASSWORD='${SAML20_KEYSTORE_PASSWORD}'
+NPLM_DEFAULT_CONSUMER_API_KEY='${NPLM_DEFAULT_CONSUMER_API_KEY}'
+NPLM_DEFAULT_CONSUMER_PWD='${NPLM_DEFAULT_CONSUMER_PWD}'
+                        """
+                                     
+                        def PRDServer = PRD_SERVERS[1]  
+                        //ssh mapping  
+                        PRDServer.user = "${SSH_USER}"
+                        PRDServer.identityFile = "${SSH_KEY}" 
+
+                           // try-catch 블록으로 원격 실행 실패 시 롤백 로직을 처리
+                        try {
+                         
+                            remoteEnvScript = envStrScript(envContent)        
+                            // remoteExecute 함수를 호출하여 원격 서버에서 스크립트 실행                             
+                            remoteExecute(remote: PRDServer, command: sshRunAlwaysHeredoc(remoteEnvScript,initConfigEnv,false,false))  
+                        
+                            initConfigEnv = [:]  //환경변수        
+                            
+                        } catch (e) { 
+                            // 원본 에러를 다시 발생시켜 빌드를 최종적으로 실패 처리
+                            throw e
+                        }
+
+                        
+                    }
+                }
+            }
+        }
+
+        stage('Execute Remote Deployment PRD Server 2') {
+            steps {
+                withCredentials([
+                   string(credentialsId: GIT_CREDENTIAL_ID, variable: 'GITHUB_PAT'),
+                   sshUserPrivateKey(credentialsId: SSH_CREDENTIAL_ID, keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER'),
+                   string(credentialsId: 'prd-mx-iris-node-pw', variable: 'PRD_MX_ADM_PW')
+                ]) {
+                    script {
+
+                        def GITHUB_URL_WITH_CREDENTIAL = "${GITHUB_URL.replace('://', "://${GITHUB_PAT}@")}"
+
+                        // === 1. Jenkins에서 전달된 환경 변수 설정 ===
+                        //echo "--- Starting Jenkins env configation ---"
+                        //# Jenkins 변수를 셸 변수로 설정
+                        initConfigEnv = [:]
+                        // echo "jenkins env: ${initConfigEnv}"
+                        //echo "--- End Jenkins env configation ---"
+ 
+                        def remoteDeployScript = "" 
+                        def PRDServer = PRD_SERVERS[1]  
+                        //ssh mapping 
+                        PRDServer.user = "${SSH_USER}"
+                        PRDServer.identityFile = "${SSH_KEY}"
+
+                        // try-catch 블록으로 원격 실행 실패 시 롤백 로직을 처리
+                        try {
+                            
+                            //QA_SERVERS.each { server ->
+                                
+                               
+                                echo "--- Starting Deployment on Remote Server [${PRDServer.host}]---" 
+ 
+                                remoteDeployScript = deployToServerScript(PRDServer)        
+                                // remoteExecute 함수를 호출하여 원격 서버에서 스크립트 실행                             
+                                remoteExecute(remote: PRDServer, command: sshRunAlwaysHeredoc(remoteDeployScript,initConfigEnv,false,false))           
+                                
+                                echo "--- Remote Deployment Finished Successfully ---"                        
+                            //} 
+
+                            initConfigEnv = [:]  //환경변수      
+                  
+                        } catch (e) {
+                            if (params.ROLLBACK_ON_FAIL) {
+                                echo "Deployment failed. Attempting to rollback on remote server..."
+                                //deploy job 호출
+                                stage('Trigger CD Rollback Job') {
+                                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                        build job: "pm-planner-prd-app-rollback", parameters: [
+                                            string(name: 'rollback_tagversion', value: "")
+                                        ]
+                                    }
+
+                                    echo "Deployment failed. Attempting to github tag delete on remote server..."
+                                    def remoteDeleteTagScript = deleteTagScript()
+                                    remoteExecute(remote: PRDServer, command: sshRunAlwaysHeredoc(remoteDeleteTagScript,initConfigEnv,false,false))
+                                }
+                            }
+
+                            // 원본 에러를 다시 발생시켜 빌드를 최종적으로 실패 처리
+                            throw e
+                        }
+                    }
+                }
+            }
+        }
+
+     stage('GitHub TAG Push') {
+            steps {
+                withCredentials([
+                   string(credentialsId: GIT_CREDENTIAL_ID, variable: 'GITHUB_PAT'),
+                   sshUserPrivateKey(credentialsId: SSH_CREDENTIAL_ID, keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER'),
+                    string(credentialsId: 'prd-mx-iris-node-pw', variable: 'PRD_MX_ADM_PW')
+                ]) {
+                    script {
+
+                        def GITHUB_URL_WITH_CREDENTIAL = "${GITHUB_URL.replace('://', "://${GITHUB_PAT}@")}"
+
+                        // === 1. Jenkins에서 전달된 환경 변수 설정 ===
+                        //echo "--- Starting Jenkins env configation ---"
+                        //# Jenkins 변수를 셸 변수로 설정
+                        initConfigEnv = [:]
+                        // echo "jenkins env: ${initConfigEnv}"
+                        //echo "--- End Jenkins env configation ---"
+ 
+                        def remoteGitToTagScript = "" 
+                        def PRDServer = PRD_SERVERS[0]  
+                        //ssh mapping 
+                        PRDServer.user = "${SSH_USER}"
+                        PRDServer.identityFile = "${SSH_KEY}"        
+
+                        // try-catch 블록으로 원격 실행 실패 시 롤백 로직을 처리
+                        try {
+                            
+                            //QA_SERVERS.each { server ->
+                                 
+ 
+                                echo "--- Starting Git Tag Push on Remote Server [${PRDServer.host}]---" 
+ 
+                                remoteGitToTagScript = gitToTagScript()        
+                                // remoteExecute 함수를 호출하여 원격 서버에서 스크립트 실행                             
+                                remoteExecute(remote: PRDServer, command: sshRunAlwaysHeredoc(remoteGitToTagScript,initConfigEnv,false,false))           
+                                
+                                echo "--- Git Tag Push Finished Successfully ---"                        
+                            //} 
+
+                            initConfigEnv = [:]  //환경변수      
+                  
+                        } catch (e) {
+                          
+                            // 원본 에러를 다시 발생시켜 빌드를 최종적으로 실패 처리
+                            throw e
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Update Jenkins Metadata') {
+            steps {
+                script {
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.APP_VERSION}"
+                    currentBuild.description = "Deployment of version  ${env.APP_VERSION} finished."
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+             echo "✅ QA 배포 완료: ${env.APP_VERSION} →  [${env.QA_SERVERS[0]}-${env.QA_SERVERS[1]}]"
+        }
+        failure {
+             echo "❌ PRD 배포 실패 — 직전 정상 태그로 IMAGE_TAG 재실행하여 롤백"
+        }
+        always {
+            echo "Deployment pipeline finished."
+            cleanWs()
+        }
+    }    
+}
+
+
+
+// ============================================================================= 
+//  prd git clone 
+// =============================================================================
+def checkoutCode() {
+  // 원격 서버에서 실행할 전체 셸 스크립트를 Groovy GString으로 생성
+    def remoteDeployCheckoutScript = """
+        #!/bin/bash
+        # -e: 오류 발생 시 즉시 중단
+        # -u: 정의되지 않은 변수 사용 시 오류
+        # -x: 실행되는 모든 명령어를 출력
+        # -o pipefail: 파이프라인의 어느 한 곳이라도 실패하면 전체 실패 처리
+        sudo mkdir -p ${env.APP_WRK_PATH}
+        sudo chmod 775 -R  ${env.APP_WRK_PATH}
+        sudo chown -R ${env.OS_USER}:${env.OS_OWNER} ${env.APP_WRK_PATH}
+
+        cd ${env.APP_WRK_PATH}                          
+        
+        # === 2. 배포 설정(docker-compose) 저장소 체크아웃 ===
+        echo "--- Checking out deployment repository ---"  
+        if [ -d "${env.BRANCH_NAME}" ]; then
+            rm -rf "${env.BRANCH_NAME}"
+        fi   
+        git clone --depth 1 --no-tags -b ${env.BRANCH_NAME} ${env.GITHUB_URL.replace('://', "://${GITHUB_PAT}@")}   ${env.BRANCH_NAME}
+
+    """
+    return remoteDeployCheckoutScript
+}
+
+
+// =============================================================================
+//  공통함수
+//  Jenkins에서 전달된 환경 변수 설정
+//  원자적쓰기 (base64 경유)
+//  byte[] bytes = envContent.getBytes('UTF-8')
+//  String bs64 = bytes.encodeBase64().toString()
+//  writeFile file: 'env.tmp', text: envContent
+// =============================================================================
+def envStrScript(envContent) {
+    def envStrScript = """
+                            #!/bin/bash
+                            # -e: 오류 발생 시 즉시 중단
+                            # -u: 정의되지 않은 변수 사용 시 오류
+                            # -x: 실행되는 모든 명령어를 출력
+                            # -o pipefail: 파이프라인의 어느 한 곳이라도 실패하면 전체 실패 처리
+
+                            cd ${env.APP_COMPOSE_PATH}        
+                            echo "--- Starting env on Remote Server ---"
+                            
+                            umask 077 
+cat > .env.tmp <<'EOT'
+${envContent}
+EOT
+
+                            sudo mv -f .env.tmp  .env
+                            sudo chmod 600 .env
+
+                            echo "--- Remote env Finished Successfully ---"
+                        """
+
+    return envStrScript
+}
+  
+
+// =============================================================================
+//  공통함수
+//  Docker compose run
+// =============================================================================
+def deployToServerScript(server) {
+
+   // 원격 서버에서 실행할 전체 셸 스크립트를 Groovy GString으로 생성
+    def deployScript = """
+        #!/bin/bash
+        # -e: 오류 발생 시 즉시 중단
+        # -u: 정의되지 않은 변수 사용 시 오류
+        # -x: 실행되는 모든 명령어를 출력
+        # -o pipefail: 파이프라인의 어느 한 곳이라도 실패하면 전체 실패 처리
+  
+        cd ${env.APP_BRANCH_PATH}     
+
+        # === 3. docker-compose.yml 파일 수정 및 애플리케이션 실행 ===
+        echo "--- Updating docker-compose.yml and starting services ---"
+        ## 레지스트리 완료 후 수정
+        MENDIX_APP_IMAGE="${env.DOCKER_ENDPOINT}/${env.DOCKER_DIR_PREFIX}/${env.APP_NAME}:${env.APP_VERSION}"
+        
+        sudo chmod 755  run_update.sh
+        sudo chmod 755 -R ./docker 
+        
+        ./run_update.sh ${env.DEPLOY_ENV}
+
+        cd ${env.APP_COMPOSE_PATH}
+
+        sed -i "s|V_APP_NAME|${env.APP_NAME}|g"                      docker-compose.yml
+        sed -i "s|V_DEPLOY_ENV|${env.DEPLOY_ENV}|g"                  docker-compose.yml
+        sed -i "s|V_MENDIX_APP_IMAGE|"\${MENDIX_APP_IMAGE}"|g"       docker-compose.yml
+        sed -i "s|V_APP_PORT|${env.APP_PORT}|g"                      docker-compose.yml
+        sed -i "s|V_RUNTIME_PORT|${env.RUNTIME_PORT}|g"              docker-compose.yml
+        sed -i "s|V_APP_METRIC_PORT|${env.APP_METRIC_PORT}|g"        docker-compose.yml
+        sed -i "s|V_NODE_HOSTNAME|${server.name}|g"                  docker-compose.yml
+        sed -i "s|V_APP_NODE_IP|${server.host}|g"                    docker-compose.yml
+        sed -i "s|V_M2EE_ADMIN_PORT|${env.M2EE_ADMIN_PORT}|g"        docker-compose.yml
+
+        sed -i "s|V_APP_DATABASE_SID|${env.APP_DATABASE_SID}|g"        docker-compose.yml
+        sed -i "s|V_APP_DATABASE_JDBC_URL|${env.APP_DATABASE_JDBC_URL}|g"        docker-compose.yml
+        sed -i "s|V_APP_DATABASE_TYPE|${env.APP_DATABASE_TYPE}|g"        docker-compose.yml
+        sed -i "s|V_ES_HOST|${env.ES_HOST}|g"        docker-compose.yml
+
+        sed -i "s|V_NPLM_NPLM_URL|${env.NPLM_NPLM_URL}|g"        docker-compose.yml
+        sed -i "s|V_NPLM_PLAN_URL|${env.NPLM_PLAN_URL}|g"        docker-compose.yml
+        sed -i "s|V_NPLM_JDBC_URL|${env.NPLM_JDBC_URL}|g"        docker-compose.yml
+
+        sed -i "s|V_MXRUNTIME_APPLICATION_ROOT_URL|${env.MXRUNTIME_APPLICATION_ROOT_URL}|g"        docker-compose.yml
+       
+        pwd       
+        ls -all
+        docker compose -p ${env.APP_NAME} up -d 
+
+        # === 4. 헬스 체크 ===
+        echo "--- Starting Health Check ---"
+        COUNTER=0
+        MAX_RETRIES=12
+        HEALTHY=false
+        while [ \$COUNTER -lt \$MAX_RETRIES ]; do
+            echo "Attempt \$((COUNTER+1))/\$MAX_RETRIES..."
+            
+            # grep의 결과가 없어도 스크립트가 중단되지 않도록 || true 추가
+            HEALTHY_COUNT=\$(docker compose -p ${env.APP_NAME} ps --status running | grep -c '(healthy)' || true)
+            TOTAL_COUNT=\$(docker compose -p ${env.APP_NAME} ps --status running | tail -n +2 | wc -l || true)
+            
+            if [ "\$TOTAL_COUNT" -gt 0 ] && [ "\$TOTAL_COUNT" -eq "\$HEALTHY_COUNT" ]; then
+                HEALTHY=true
+                echo "All services are healthy!"
+                break
+            fi
+            COUNTER=\$((COUNTER+1))
+            sleep 10
+        done
+
+        if [ "\$HEALTHY" = "false" ]; then
+            echo " Health check failed! Current status:"
+            docker compose -p ${env.APP_NAME} ps
+            exit 1 # 스크립트 실패 처리
+        fi
+
+        # === 5. 배포 성공 버전 정보 커밋 및 푸시 ===
+        echo "--- Committing version update to Git ---"
+        cd ../.. # Git root로 이동
+        # 필터링으로 label이 적용되어 있는 값을 찾아  사용하지 않은 이미지 삭제
+        docker image prune -a -f --filter "label=project" 
+ 
+        
+    """
+        
+    return  deployScript
+ 
+}
+
+
+// =============================================================================
+//  공통함수
+//  Docker compose ok git tag push
+// =============================================================================
+def gitToTagScript() {
+
+   // 원격 서버에서 실행할 전체 셸 스크립트를 Groovy GString으로 생성
+    def gitToTagScript = """
+        #!/bin/bash
+        # -e: 오류 발생 시 즉시 중단
+        # -u: 정의되지 않은 변수 사용 시 오류
+        # -x: 실행되는 모든 명령어를 출력
+        # -o pipefail: 파이프라인의 어느 한 곳이라도 실패하면 전체 실패 처리
+  
+        cd ${env.APP_BRANCH_PATH}     
+ 
+
+        echo "${env.BUILD_MODE}${env.APP_VERSION}" > version-prd.txt
+        
+        git config --global user.email "iris-jenkins@example.com"
+        git config --global user.name "iris-jenkins"
+
+        if [ -n "\$(git status --porcelain)" ]; then
+            git add .
+            git commit -m "update ${env.APP_NAME}"
+            git push ${env.GITHUB_URL.replace('://', "://${GITHUB_PAT}@")} ${env.BRANCH_NAME}
+        else
+            echo "No changes to commit."
+        fi
+
+        # === 6. 배포 성공 태그 생성 및 푸시 ===
+        echo "--- Tagging successful deployment ---" 
+        DEPLOY_TAG="${env.BUILD_MODE}${env.APP_VERSION}"
+        
+        # 원격에 동일한 태그가 있으면 삭제 후 재생성
+        if git ls-remote --tags ${env.GITHUB_URL.replace('://', "://${GITHUB_PAT}@")} | grep -q "refs/tags/\${DEPLOY_TAG}"; then
+            echo "Deleting existing remote tag \${DEPLOY_TAG}"
+            git push ${env.GITHUB_URL.replace('://', "://${GITHUB_PAT}@")} ":\${DEPLOY_TAG}"
+        fi
+        
+        git tag -a "\${DEPLOY_TAG}" -m "Created CICD tag [\${DEPLOY_TAG}] by Jenkins"
+        git push ${env.GITHUB_URL.replace('://', "://${GITHUB_PAT}@")} "\${DEPLOY_TAG}"
+        git fetch ${env.GITHUB_URL.replace('://', "://${GITHUB_PAT}@")} --prune --prune-tags -f
+
+        # === 7. 오래된 태그 삭제 ===
+        TAG_COUNT=\$(git tag --list --sort=-creatordate "\${BUILD_MODE}*" | wc -l)
+        if [ \$TAG_COUNT -gt ${env.TAG_CNT_LIMIT} ]; then
+            OLDEST_TAG=\$(git tag --list --sort=creatordate "${env.BUILD_MODE}*" | head -n 1)
+            echo "Limit exceeded. Deleting oldest tag: \${OLDEST_TAG}"
+            git push ${env.GITHUB_URL.replace('://', "://${GITHUB_PAT}@")} --delete "\${OLDEST_TAG}"
+        fi 
+        
+    """
+        
+    return  gitToTagScript
+ 
+}
+
+// =============================================================================
+//  공통함수
+//  git build tag delete 
+// =============================================================================
+def deleteTagScript() {
+
+   def deleteTagScript = """
+                        #!/bin/bash
+                        # -e: 오류 발생 시 즉시 중단
+                        # -u: 정의되지 않은 변수 사용 시 오류
+                        # -x: 실행되는 모든 명령어를 출력
+                        # -o pipefail: 파이프라인의 어느 한 곳이라도 실패하면 전체 실패 처리
+                        cd ${env.APP_BRANCH_PATH}
+
+                        echo "--- Starting GITHUB tag delete ---"
+                        if [[ -z "\${BUILD_APP_TAG:-}" || "\${BUILD_APP_TAG:-}" = 'null' ]]; then
+                            echo "--- GITHUB tag delete skip ---"
+                        else
+                            git push ${env.GITHUB_URL.replace('://', "://${GITHUB_PAT}@")} ":\${BUILD_APP_TAG}"
+                        fi
+                    """
+        
+   return  deleteTagScript
+ 
+}
+ 
