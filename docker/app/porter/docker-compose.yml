@@ -1,0 +1,15 @@
+#version: '3.8'
+services:
+  portainer:
+    image: harbor.nib.kr:8491/library/portainer/portainer-ce:latest
+    container_name: portainer
+    restart: unless-stopped
+    ports:
+      - "18275:8000" # Edge agent communications
+      - "18276:9443" # Portainer UI
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /appdata/portainer/data:/data
+
+#volumes:
+#  portainer_data:

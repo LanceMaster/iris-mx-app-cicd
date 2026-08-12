@@ -1,0 +1,20 @@
+version: "3.9"
+services: 
+    db:
+        image: postgres:17.5
+        networks: 
+         - iris-mx-net   
+        healthcheck:
+            test: ["CMD", "pg_isready", "-U", "mendix"]
+            interval: 5s
+            retries: 10
+            start_period: 10s
+            timeout: 2s
+        environment:
+            - POSTGRES_USER=mendix
+            - POSTGRES_PASSWORD=mendix
+        ports:
+            - 15432:5432
+networks:
+  iris-mx-net:
+#    driver: bridge

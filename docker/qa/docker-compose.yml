@@ -1,0 +1,139 @@
+services:
+  mendixapp:
+    container_name: mendix-iris-qa
+    image: 10.173.129.72:5001/iris/app/mendix-iris-qa:1.0.1-rc.1
+    labels:
+      project: mendix-iris-qa
+      env: qa
+    restart: unless-stopped
+    env_file:
+    - .env
+    ports:
+    - 8080:8080
+    - 8081:8081
+    - 8082:8082
+    networks:
+    - iris-mx-net
+    volumes:
+    - /appdata/siemens/workspace/mx/mx_iris/iris-data:/iris-data
+    healthcheck:
+      test:
+      - CMD
+      - curl
+      - -f
+      - http://10.173.193.68:8080
+      interval: 15s
+      retries: 2
+      start_period: 10s
+      timeout: 3s
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASS}
+      ENV: qa
+      TZ: Asia/Seoul
+      LICENSE_ID: 916a2778-998b-4ebb-aff1-f3ab8b7c034a
+      LICENSE_KEY: ${LICENSE_KEY}
+      MXRUNTIME_DatabaseType: Oracle
+      MXRUNTIME_DatabaseJdbcUrl: jdbc:oracle:thin:@10.155.22.54:1621/MX_PMP_QA
+      MXRUNTIME_DatabaseUserName: ${DB_USER}
+      MXRUNTIME_DatabasePassword: ${DB_PASS}
+      MXRUNTIME_DatabaseName: MX_PMP_QA
+      MXRUNTIME_ApplicationRootUrl: https://pmsimqa-plm.samsungds.net:8080/
+      MXRUNTIME_com_mendix_core_SameSiteCookies: None
+      MXRUNTIME_SessionTimeout: '600000'
+      MXRUNTIME_com_mendix_metrics_Type: micrometer
+      MXRUNTIME_Metrics_Registries: '[{"type": "prometheus", "settings": {"step": "1m"}}]'
+      MXRUNTIME_Metrics_ApplicationTags: '{"hostId": "dptmxpmpappqw01", "environment": "10.173.193.68"}'
+      MXRUNTIME_ConnectionPoolingMaxActive: '2000'
+      MXRUNTIME_ConnectionPoolingMaxIdle: '1000'
+      MXRUNTIME_ConnectionPoolingMinIdle: '10'
+      MXRUNTIME_com_mendix_webui_StateSizeWarningThreshold: '3000'
+      MXRUNTIME_http_client_MaxConnectionsPerRoute: '1000'
+      MXRUNTIME_http_client_MaxConnectionsTotal: '2000'
+      JAVA_OPTS: '["-Dorg.eclipse.jetty.server.Request.maxFormContentSize=10485760"]'
+      MEMORY_LIMIT: 3072M
+      HEAP_SIZE: 2048M
+      JETTY_CONFIG: '{"runtime_max_threads":"200"}'
+      LOGGING_CONFIG: '{"Core":"INFO","ConnectionBus":"INFO"}'
+      ScheduledEventExecution: NONE
+      SCHEDULED_EVENTS: SAML20.SE_LogCleanUp,SAML20.SE_SynchronizeIdPMetadata,Logging.CleanupDataLogging,Core.CleanupUserAccessLogging
+      MX_Logging_EnablePreFilter: 'true'
+      MX_SAML20_BindingURI_Redirect: 'false'
+      MX_SAML20_DefaultLogoutPage: /SSO/
+      MX_SAML20_DisableDecoding_Deeplink_URL: 'false'
+      MX_SAML20_KeystorePassword: ${SAML20_KEYSTORE_PASSWORD}
+      MX_SAML20_SSOLandingPage: index.html
+      MX_Core_LogNode_Startup: Boot
+      MX_IAMIntegration_IAMEnableInActiveProcess: 'true'
+      MX_IAMIntegration_IAMAPIUser_Username: iamuser
+      MX_IAMIntegration_IAMAPIUser_Password: ${IAMAPIUSER_PW}
+      MX_CommunityCommons_MergeMultiplePdfs_MaxAtOnce: '10'
+      MX_Encryption_LogNode: Encryption
+      MX_Encryption_EncryptionPrefix: '{AES3}'
+      MX_Encryption_EncryptionKey: B<&Wr]4eIkqU<:fwH@sf8#woOi33H><P
+      MX_Encryption_LegacyEncryptionKey: ''
+      MX_ExcelImporter_ParseEmptyCells: 'false'
+      MX_ExcelImporter_EnableExternalEntities: 'false'
+      MX_ExternalDatabaseConnector_ExternalDatabaseConnectorVersion: 5.3.7
+      MX_ExternalDatabaseConnector_LogNode: ExternalDatabaseConnector
+      MX_FeedbackModule_ClientIdentifier: Feedback Module 4.0.2
+      MX_FeedbackModule_LocalStorageKey: mxfeedback-form-data
+      MX_Logging_Level: INFO
+      MX_Logging_LogHistoryDays: '90'
+      MX_AccessLogHistoryDays: '180'
+      MX_Logging_CleanupFilter: ''
+      MX_UserCommons_DisableMxAdmin: 'true'
+      MX_AxMonitor_LOGNODE_AX_MONITOR: AxMonitor
+      MX_AxMonitor_SourceDatabase_DBUsername: ${DB_USER}
+      MX_AxMonitor_SourceDatabase_DBSource: jdbc:oracle:thin:@10.155.22.54:1621/MX_PMP_QA
+      MX_AxMonitor_SourceDatabase_DBPassword: ${DB_PASS}
+      MX_AxAnalysis_AX_ANALYSIS_ES_HOST: http://10.173.225.26:9200
+      MX_AxAnalysis_LOGNODE_AX_ANALYSIS: AxAnalysis
+      MX_AxAnalysis_AX_ANALYSIS_ENABLE_INGESTION: 'True'
+      MX_AxAnalysis_AX_ANALYSIS_TASK_QUEUE_THREADS: '40'
+      MX_PmPlanAnalysis_ES_PREFIX_DATA: plan-data
+      MX_PmPlanAnalysis_LOG_NODE_ANALYSIS: DataAnalysis
+      MX_PmPlanAnalysis_ES_PREFIX_DRAFT: plan-draft
+      MX_PmPlanAnalysis_ES_HOST: http://10.173.225.26:9200
+      MX_XLSReport_UseStreamingAPI: 'True'
+      MX_PmKnoxAPI_CONS_IsProduction: 'False'
+      MX_PmKnoxAPI_CONS_URL_Knox_STAGE: https://openapi.stage.samsung.net
+      MX_PmKnoxAPI_CONS_URL_Knox_PROD: https://openapi.samsung.net
+      MX_PmKnoxAPI_CONS_URI_Mail_Send: /mail/api/v2.0/mails/send
+      MX_PmStandardInfo_TopOrgCCTRCodes: ''
+      MX_PmStandardInfo_JdbcPassword: ''
+      MX_PmStandardInfo_JdbcUrl: ''
+      MX_PmStandardInfo_JdbcUsername: ''
+      MX_PmStandardInfo_SpChar: ''
+      MX_PmStandardInfo_PmsJdbcPassword: ${DB_PASS}
+      MX_PmStandardInfo_PmsJdbcUsername: ${DB_USER}
+      MX_PmStandardInfo_DevJdbcUrl: jdbc:oracle:thin:@10.155.22.54:1621/MX_PMP_QA
+      MX_PmStandardInfo_LOG_NODE_SIMULATION: PmStandardInfo
+      MX_PmStandardInfo_RevisionMajor: '42'
+      MX_TCDataIntegration_SA_TCAccountPassword: '1'
+      MX_TCDataIntegration_SA_MXAccountPassword: ${ADMIN_PASS}
+      MX_TCDataIntegration_IsLocalTCTesting: 'True'
+      MX_TCDataIntegration_SA_TCAccountName: tcadmin
+      MX_TCDataIntegration_SA_MXAccountName: tcapi
+      MX_TCDataIntegration_LogNode: Teamcenter
+      MX_NPLMIntegration_NplmUrl: http://10.173.192.91:8812/api/slsi/PMP_009
+      MX_NPLMIntegration_TIMEZONE_OFFSET_HOURS: '9'
+      MX_NPLMIntegration_TRACING_LOG_INTERVAL: '333'
+      MX_NPLMIntegration_AUTHENTICATION_KEY_NAME: X-API-Key
+      MX_NPLMIntegration_DEFAULT_CONSUMER_API_KEY: ${NPLM_DEFAULT_CONSUMER_API_KEY}
+      MX_NPLMIntegration_DEFAULT_CONSUMER_NAME: Profit_Integration_Default_Consumer
+      MX_NPLMIntegration_DEFAULT_CONSUMER_PWD: ${NPLM_DEFAULT_CONSUMER_PWD}
+      MX_NPLMIntegration_LOG_NODE_NAME: ProfitWebhook
+      MX_NPLMIntegration_SERVICES_CONTEXT_PATH: profit-integration
+      MX_NPLMIntegration_JdbcPassword: ${NPLM_PW}
+      MX_NPLMIntegration_PlanUrl: https://pmsimqa-plm.samsungds.net:8080/rest/NPLMIntegrationService/v1/plan_info?
+      MX_NPLMIntegration_JdbcUrl_2: ''
+      MX_NPLMIntegration_JdbcUrl: jdbc:oracle:thin:@//10.155.21.159:1633/DHUB
+      MX_NPLMIntegration_JdbcUsername: ${NPLM_USER}
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+networks:
+  iris-mx-net:
+    name: mendix-iris-qa_iris-mx-net

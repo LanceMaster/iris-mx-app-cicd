@@ -1,0 +1,2 @@
+Usage: dozzle generate [--password PASSWORD] [--name NAME] [--email EMAIL] [--user-filter USER-FILTER] [--user-roles USER-ROLES] [USERNAME]
+error: unknown argument -f

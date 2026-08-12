@@ -1,0 +1,38 @@
+services:
+    mendixapp:
+        container_name: V_APP_NAME
+        image: V_MENDIX_APP_IMAGE
+        labels:
+            project: "V_APP_NAME"
+            env: "V_DEPLOY_ENV"
+        restart: unless-stopped
+        env_file:
+         - .env
+        ports:
+         - V_RUNTIME_PORT:V_APP_PORT
+         - V_M2EE_ADMIN_PORT:8081
+         - V_APP_METRIC_PORT:8082
+        networks: 
+         - iris-mx-net
+        volumes:
+         - /appdata/siemens/workspace/mx/mx_iris/iris-data:/iris-data
+        healthcheck:
+            test: ["CMD", "curl", "-f", "http://V_APP_NODE_IP:V_RUNTIME_PORT"]
+            interval: 15s
+            retries: 2
+            start_period: 10s
+            timeout: 3s
+        environment:
+            ADMIN_PASSWORD: ""
+        deploy:
+            resources:
+                limits:
+                  cpus: 0.50
+                  memory: 512M 
+#volumes:
+#  oradata-${ENV}: {}
+
+networks:
+  iris-mx-net:
+    name: V_APP_NAME_iris-mx-net
+#    driver: bridge
